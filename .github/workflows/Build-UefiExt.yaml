@@ -53,5 +53,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          zip -qq -r UefiExt_${{ matrix.platform }}.zip ${{ github.event.release.tag_name }} UefiDbgExt\${{ matrix.platform }}\${{ matrix.configuration }}\uefiext.dll
+          Compress-Archive -Path UefiDbgExt\${{ matrix.platform }}\${{ matrix.configuration }}\uefiext.dll -DestinationPath UefiExt_${{ matrix.platform }}.zip
           gh release upload UefiExt_${{ matrix.platform }}.zip
