@@ -131,6 +131,208 @@ PCSTR  PhaseStrings[] = {
 // *******************************************************  External Functions
 //
 
+// VOID
+// DumpRustMemory (
+//   IN ULONG64  NodeAddress,
+//   IN ULONG    Length,
+//   IN BOOLEAN  Root
+//   )
+// {
+//   if (NodeAddress == 0) {
+//     return;
+//   }
+
+//   if (root) {
+//     dprintf ("    Start             End               Pages             Attributes        MemoryType   \n");
+//     dprintf ("-------------------------------------------------------------------------------------------------------\n");
+//   }
+
+//   if (root) {
+//     dprintf ("-------------------------------------------------------------------------------------------------------\n");
+//   }
+// }
+
+BOOLEAN
+TryUnwrapRustType (
+  IDebugSymbols3  *pSymbols,
+  ULONG64         ModuleBase,
+  PULONG64        Address,
+  PULONG          TypeId
+  )
+
+{
+  ULONG64  NewAddress;
+  ULONG    NewTypeId;
+  UCHAR    TypeName[512] = { 0 };
+  HRESULT  Result;
+  ULONG    Offset;
+
+  // Check if it is a pointer.
+  Result = pSymbols->GetTypeName (
+                       ModuleBase,
+                       *TypeId,
+                       (PSTR)&TypeName[0],
+                       sizeof (TypeName),
+                       NULL
+                       );
+
+  if (FAILED (Result)) {
+    return FALSE;
+  }
+
+  if (TypeName[strlen ((PSTR)&TypeName[0]) - 1] == '*') {
+    TypeName[strlen ((PSTR)&TypeName[0]) - 1] = '\0';
+
+    // Dereference the pointer.
+    ReadMemory (*Address, &NewAddress, sizeof (NewAddress), NULL);
+    dprintf ("Pointer: Dereferencing to: %I64x\n", NewAddress);
+    Result   = pSymbols->GetTypeId (ModuleBase, (PSTR)&TypeName[0], &NewTypeId);
+    *Address = NewAddress;
+    *TypeId  = NewTypeId;
+    return TRUE;
+  }
+
+  Result = pSymbols->GetFieldTypeAndOffset (
+                       ModuleBase,
+                       *TypeId,
+                       "discriminant",
+                       &NewTypeId,
+                       &Offset
+                       );
+
+  if (SUCCEEDED (Result)) {
+    dprintf ("Enum!\n");
+    ULONG64  Discriminant;
+    ReadMemory (*Address + Offset, &Discriminant, sizeof (Discriminant), NULL);
+    PSTR  Variant = "";
+    // need to do better here...
+    if (Discriminant == 0) {
+      Variant = "variant0";
+    } else {
+      Variant = "variant1";
+    }
+
+    Result = pSymbols->GetFieldTypeAndOffset (ModuleBase, *TypeId, Variant, &NewTypeId, &Offset);
+    if (FAILED (Result)) {
+      return FALSE;
+    }
+
+    NewAddress = *Address + Offset;
+
+    Result = pSymbols->GetTypeName (
+                         ModuleBase,
+                         *TypeId,
+                         (PSTR)&TypeName[0],
+                         sizeof (TypeName),
+                         NULL
+                         );
+
+    Discriminant = 0xCFCFCF;
+    GetFieldValue (NewAddress, (PSTR)&TypeName[0], "DISCR_BEGIN", Discriminant);
+    dprintf("Read discriminant: %I64x\n", Discriminant);
+
+    pSymbols->GetFieldTypeAndOffset (ModuleBase, NewTypeId, "value", &NewTypeId, &Offset);
+    if (FAILED (Result)) {
+      return FALSE;
+    }
+
+    NewAddress += Offset;
+    pSymbols->GetFieldTypeAndOffset (ModuleBase, NewTypeId, "__0", &NewTypeId, &Offset);
+    if (FAILED (Result)) {
+      return FALSE;
+    }
+
+    NewAddress += Offset;
+    *Address    = NewAddress;
+    *TypeId     = NewTypeId;
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
+BOOLEAN
+WalkRustTypes (
+  IDebugSymbols3  *pSymbols,
+  PSTR            Global,
+  PSTR            Fields[],
+  ULONG           FieldCount,
+  ULONG64         *FinalAddress,
+  ULONG           *FinalTypeId
+  )
+{
+  ULONG    TypeId;
+  ULONG64  Address;
+  ULONG64  ModuleBase;
+  UCHAR    TypeName[512] = { 0 };
+  ULONG    Index;
+  ULONG    Offset;
+  HRESULT  Result;
+  ULONG64  Discriminant;
+
+  // Get the global info.
+  pSymbols->GetSymbolTypeId (Global, &TypeId, &ModuleBase);
+  pSymbols->GetOffsetByName (Global, &Address);
+  dprintf ("Root TypeId: %x\n", TypeId);
+  dprintf ("ModuleBase: %I64x\n", ModuleBase);
+  dprintf ("Root Address: %I64x\n", Address);
+
+  Index = 0;
+  while (Index < FieldCount) {
+    // If this is a enum, disambiguate.
+    Result = pSymbols->GetFieldTypeAndOffset (ModuleBase, TypeId, "discriminant", &TypeId, &Offset);
+    if (SUCCEEDED (Result)) {
+      dprintf ("Enum!\n");
+      ReadMemory (Address + Offset, &Discriminant, sizeof (Discriminant), NULL);
+      pSymbols->GetFieldTypeAndOffset (ModuleBase, TypeId, Fields[Index], &TypeId, &Offset);
+    }
+
+    pSymbols->GetFieldTypeAndOffset (
+                ModuleBase,
+                TypeId,
+                Fields[Index],
+                &TypeId,
+                &Offset
+                );
+
+    dprintf ("\n%0d: Field: %s TypeId: %x Offset: 0x%x\n", Index, Fields[Index], TypeId, Offset);
+    pSymbols->GetTypeName (ModuleBase, TypeId, (PSTR)&TypeName[0], sizeof (TypeName), NULL);
+    dprintf ("TypeName: %s\n", TypeName);
+
+    // TODO auto-handle cells?
+
+    // value, p, discriminant
+
+    // Check if the type is a Rust Option<*> type
+    Address += Offset;
+    // if (strstr ((PSTR)TypeName, "core::option::Option") != NULL) {
+    //   dprintf ("OPTION!\n");
+    //   ULONG64  Discriminant;
+    //   pSymbols->GetFieldTypeAndOffset (ModuleBase, TypeId, "discriminant", &TypeId, &Offset);
+    //   ReadMemory (Address + Offset, &Discriminant, sizeof (Discriminant), NULL);
+    //   if (Discriminant == 0) {
+    //     dprintf ("Option is None\n");
+    //     return FALSE;
+    //   } else {
+    //     dprintf ("Option is Some\n");
+    //     pSymbols->GetFieldTypeAndOffset (ModuleBase, TypeId, "variant1", &TypeId, &Offset);
+    //     pSymbols->GetFieldTypeAndOffset (ModuleBase, TypeId, "value", &TypeId, &Offset);
+    //     pSymbols->GetFieldTypeAndOffset (ModuleBase, TypeId, "__0", &TypeId, &Offset);
+    //   }
+    // }
+
+    TryUnwrapRustType (pSymbols, ModuleBase, &Address, &TypeId);
+
+    // TODO check if pointer?
+    dprintf ("Address: %I64x\n", Address);
+    Index++;
+  }
+
+  *FinalAddress = 0;
+  *FinalTypeId  = 0;
+  return TRUE;
+}
+
 HRESULT CALLBACK
 memorymap (
   PDEBUG_CLIENT4  Client,
@@ -151,55 +353,62 @@ memorymap (
 
   UNREFERENCED_PARAMETER (args);
 
-  if (gUefiEnv != DXE) {
+  gUefiEnv = RUST; // hack
+
+  if (gUefiEnv == RUST) {
+    if (GetExpressionEx (args, &HeadAddress, &args) == FALSE) {
+      dprintf ("Must provide root descriptor address!\n");
+      return ERROR_INVALID_PARAMETER;
+    }
+  } else if (gUefiEnv == DXE) {
+    HeadAddress = GetExpression ("&gMemoryMap");
+    if (HeadAddress == NULL) {
+      dprintf ("Failed to find gMemoryMap!\n");
+      return ERROR_NOT_FOUND;
+    }
+
+    dprintf ("    Start             End               Pages             Attributes        MemoryType   \n");
+    dprintf ("-------------------------------------------------------------------------------------------------------\n");
+    MemoryEntry = 0;
+    while ((MemoryEntry = GetNextListEntry (HeadAddress, "MEMORY_MAP", "Link", MemoryEntry)) != 0) {
+      GetFieldValue (MemoryEntry, "MEMORY_MAP", "Type", Type);
+      GetFieldValue (MemoryEntry, "MEMORY_MAP", "Start", Start);
+      GetFieldValue (MemoryEntry, "MEMORY_MAP", "End", End);
+      GetFieldValue (MemoryEntry, "MEMORY_MAP", "Attribute", Attribute);
+      Pages = ((End + 1) - Start) / PAGE_SIZE;
+
+      dprintf (
+        "    %016I64x  %016I64x  %16I64x  %016I64x  %-2d (%s)\n",
+        Start,
+        End,
+        Pages,
+        Attribute,
+        Type,
+        Type < MEMORY_TYPE_COUNT ? MemoryTypeString[Type] : "Unknown"
+        );
+
+      //
+      // Memory size tracking.
+      //
+
+      TotalMemory += (End - Start + 1);
+      if (Type < MEMORY_TYPE_COUNT) {
+        TypeSize[Type] += (End - Start + 1);
+      }
+    }
+
+    dprintf ("-------------------------------------------------------------------------------------------------------\n");
+    for (Type = 0; Type < MEMORY_TYPE_COUNT; Type++) {
+      dprintf ("    %-30s %16I64x\n", MemoryTypeString[Type], TypeSize[Type]);
+    }
+
+    dprintf ("\n    %-30s %16I64x\n", "Total", TotalMemory);
+
+    dprintf ("-------------------------------------------------------------------------------------------------------\n");
+  } else {
     dprintf ("Only supported for DXE!\n");
     return ERROR_NOT_SUPPORTED;
   }
-
-  HeadAddress = GetExpression ("&gMemoryMap");
-  if (HeadAddress == NULL) {
-    dprintf ("Failed to find gMemoryMap!\n");
-    return ERROR_NOT_FOUND;
-  }
-
-  dprintf ("    Start             End               Pages             Attributes        MemoryType   \n");
-  dprintf ("-------------------------------------------------------------------------------------------------------\n");
-  MemoryEntry = 0;
-  while ((MemoryEntry = GetNextListEntry (HeadAddress, "MEMORY_MAP", "Link", MemoryEntry)) != 0) {
-    GetFieldValue (MemoryEntry, "MEMORY_MAP", "Type", Type);
-    GetFieldValue (MemoryEntry, "MEMORY_MAP", "Start", Start);
-    GetFieldValue (MemoryEntry, "MEMORY_MAP", "End", End);
-    GetFieldValue (MemoryEntry, "MEMORY_MAP", "Attribute", Attribute);
-    Pages = ((End + 1) - Start) / PAGE_SIZE;
-
-    dprintf (
-      "    %016I64x  %016I64x  %16I64x  %016I64x  %-2d (%s)\n",
-      Start,
-      End,
-      Pages,
-      Attribute,
-      Type,
-      Type < MEMORY_TYPE_COUNT ? MemoryTypeString[Type] : "Unknown"
-      );
-
-    //
-    // Memory size tracking.
-    //
-
-    TotalMemory += (End - Start + 1);
-    if (Type < MEMORY_TYPE_COUNT) {
-      TypeSize[Type] += (End - Start + 1);
-    }
-  }
-
-  dprintf ("-------------------------------------------------------------------------------------------------------\n");
-  for (Type = 0; Type < MEMORY_TYPE_COUNT; Type++) {
-    dprintf ("    %-30s %16I64x\n", MemoryTypeString[Type], TypeSize[Type]);
-  }
-
-  dprintf ("\n    %-30s %16I64x\n", "Total", TotalMemory);
-
-  dprintf ("-------------------------------------------------------------------------------------------------------\n");
 
   EXIT_API ();
   return S_OK;
@@ -222,7 +431,65 @@ hobs (
   // Collect the hobs in the environment specific way.
   //
 
-  if (gUefiEnv == DXE) {
+  if (gUefiEnv == RUST) {
+    ULONG    TypeId;
+    ULONG64  Address;
+    // ULONG64  ModuleBase;
+    // UCHAR    ModuleName[256] = { 0 };
+    // UCHAR    TypeName[256]   = { 0 };
+
+    IDebugSymbols3  *g_ExtSymbols = NULL;
+    if ((Client->QueryInterface (__uuidof (IDebugSymbols3), (void **)&g_ExtSymbols)) != S_OK) {
+      dprintf ("Failed to get IDebugSymbols3 interface!\n");
+      return E_FAIL;
+    }
+
+    PSTR  Fields[] = { "memory", "data", "value", "memory_blocks", "root", "p", "value" };
+    WalkRustTypes (
+      g_ExtSymbols,
+      "dxe_core::GCD",
+      Fields,
+      7,
+      &Address,
+      &TypeId
+      );
+
+    // g_ExtSymbols->GetSymbolTypeId ("dxe_core::GCD", &TypeId, &ModuleBase);
+    // dprintf ("TypeId: %x\n", TypeId);
+    // dprintf ("ModuleBase: %I64x\n", ModuleBase);
+    // g_ExtSymbols->GetModuleNames (
+    //                 DEBUG_ANY_ID,
+    //                 ModuleBase,
+    //                 (PSTR)&ModuleName[0],
+    //                 sizeof (ModuleName),
+    //                 NULL,
+    //                 NULL,
+    //                 0,
+    //                 NULL,
+    //                 NULL,
+    //                 0,
+    //                 NULL
+    //                 );
+
+    // g_ExtSymbols->GetTypeOptions
+
+    //   dprintf ("ModuleName: %s\n", ModuleName);
+
+    // g_ExtSymbols->GetTypeName (ModuleBase, TypeId, (PSTR)&TypeName[0], sizeof (TypeName), NULL);
+    // dprintf ("TypeName: %s\n\n", TypeName);
+
+    // g_ExtSymbols->GetFieldTypeAndOffset (
+    //                 ModuleBase,
+    //                 TypeId,
+    //                 "memory",
+    //                 &TypeId,
+    //                 NULL
+    //                 );
+
+    // dprintf ("TypeId: %x\n", TypeId);
+    // g_ExtSymbols->GetTypeName (ModuleBase, TypeId, (PSTR)&TypeName[0], sizeof (TypeName), NULL);
+    // dprintf ("TypeName: %s\n\n", TypeName);
+  } else if (gUefiEnv == DXE) {
     if (GetExpressionEx (args, &HobAddr, &args) == FALSE) {
       HobAddr = GetTableAddress (HobList);
     }

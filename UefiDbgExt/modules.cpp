@@ -192,6 +192,42 @@ findmodule (
   return Result;
 }
 
+// HRESULT
+// LoadMonitorModules (
+//   PDEBUG_CLIENT4  Client
+//   )
+// {
+//   HRESULT      Result;
+//   PSTR         Response;
+//   const ULONG  Stride = 20;
+//   ULONG        Offset = 0;
+
+//   while (TRUE) {
+//     Response = MonitorCommandWithOutput (Client, "mod list %d %d", Stride, Offset);
+//     if (Response == NULL) {
+//       break;
+//     }
+
+//     char  *line = strtok (Response, "\n");
+//     while (line != NULL) {
+//       char  *part1 = strtok (line, ":");
+//       char  *part2 = strtok (NULL, ":");
+//       char  *part3 = strtok (NULL, ":");
+
+//       if (part1 && part2 && part3) {
+//         dprintf ("Part 1: %s, Part 2: %s, Part 3: %s\n", part1, part2, part3);
+//       }
+
+//       line = strtok (NULL, "\n");
+//     }
+
+//     Offset += Stride;
+//     free (Response);
+//   }
+
+//   return Result;
+// }
+
 HRESULT CALLBACK
 findall (
   PDEBUG_CLIENT4  Client,
@@ -204,11 +240,6 @@ findall (
 
   INIT_API ();
 
-  if (gUefiEnv != DXE) {
-    dprintf ("Only supported for DXE!\n");
-    return ERROR_NOT_SUPPORTED;
-  }
-
   //
   // First find the current module
   //
@@ -218,37 +249,39 @@ findall (
     return Result;
   }
 
-  //
-  // Find the core module. This might be the same as the executing one.
-  //
+  if (gUefiEnv == DXE) {
+    //
+    // Find the core module. This might be the same as the executing one.
+    //
 
-  BsPtrAddr = GetExpression ("gBS");
-  if (BsPtrAddr == NULL) {
-    dprintf ("Failed to find boot services table pointer!\n");
-    return ERROR_NOT_FOUND;
+    BsPtrAddr = GetExpression ("gBS");
+    if (BsPtrAddr == NULL) {
+      dprintf ("Failed to find boot services table pointer!\n");
+      return ERROR_NOT_FOUND;
+    }
+
+    if (!ReadPointer (BsPtrAddr, &BsTableAddr)) {
+      dprintf ("Failed to find boot services table!\n");
+      return ERROR_NOT_FOUND;
+    }
+
+    Result = FindModuleBackwards (BsTableAddr);
+    if (Result != S_OK) {
+      return Result;
+    }
+
+    g_ExtControl->Execute (
+                    DEBUG_OUTCTL_ALL_CLIENTS,
+                    "ld *Core",
+                    DEBUG_EXECUTE_DEFAULT
+                    );
+
+    //
+    // Load all the other modules.
+    //
+
+    Result = loadmodules (Client, "");
   }
-
-  if (!ReadPointer (BsPtrAddr, &BsTableAddr)) {
-    dprintf ("Failed to find boot services table!\n");
-    return ERROR_NOT_FOUND;
-  }
-
-  Result = FindModuleBackwards (BsTableAddr);
-  if (Result != S_OK) {
-    return Result;
-  }
-
-  g_ExtControl->Execute (
-                  DEBUG_OUTCTL_ALL_CLIENTS,
-                  "ld *Core",
-                  DEBUG_EXECUTE_DEFAULT
-                  );
-
-  //
-  // Load all the other modules.
-  //
-
-  Result = loadmodules (Client, "");
 
   EXIT_API ();
   return S_OK;
